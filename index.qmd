@@ -1,7 +1,7 @@
 ---
 title: "Invisible Crisis: Healthcare Waste Management Around the World"
 subtitle: "A UNICEF Data Analysis Report"
-author: "Data Analyst, UNICEF"
+author: "Satvik Rajput, UNICEF"
 date: today
 format:
   html:

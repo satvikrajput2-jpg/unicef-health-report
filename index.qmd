@@ -1,0 +1,368 @@
+---
+title: "Invisible Crisis: Healthcare Waste Management Around the World"
+subtitle: "A UNICEF Data Analysis Report"
+author: "Data Analyst, UNICEF"
+date: today
+format:
+  html:
+    embed-resources: true
+    code-fold: true
+    theme: flatly
+    toc: true
+    toc-depth: 3
+    toc-title: "Contents"
+    fig-width: 10
+    fig-height: 6
+execute:
+  warning: false
+  message: false
+---
+
+## Introduction
+
+Every year, healthcare facilities worldwide generate millions of tonnes of medical waste — used needles, contaminated dressings, expired medicines, and biological material. When this waste is **not properly managed**, it becomes a silent public health emergency: spreading disease, contaminating water, and endangering the workers and communities closest to it.
+
+This report examines a critical UNICEF indicator: the **proportion of healthcare facilities with basic health care waste management services**. The data, spanning from 2000 to 2023, reveals stark global inequalities — and a troubling truth: in the countries that need health infrastructure the most, the systems to safely manage its byproducts are often weakest.
+
+> *"A healthcare system is only as strong as its ability to safely manage the risks it generates."*
+
+### Key Questions We Explore
+
+- Which countries and regions are leading — and lagging — in healthcare waste management?
+- Has the situation improved over time?
+- Is there a link between a country's wealth and its waste management capacity?
+- Which regions carry the greatest burden of inadequate waste management?
+
+---
+
+## Data & Methodology
+
+```{python}
+#| label: setup
+#| echo: true
+
+import polars as pl
+import pandas as pd
+import numpy as np
+import geopandas as gpd
+from plotnine import *
+import warnings
+warnings.filterwarnings("ignore")
+
+# --- Load data ---
+ind = pl.read_csv("unicef_indicator_2.csv")
+meta = pl.read_csv("unicef_metadata.csv")
+
+# --- Basic EDA ---
+print("Indicator dataset shape:", ind.shape)
+print("Metadata dataset shape:", meta.shape)
+print("\nIndicator columns:", ind.columns)
+print("\nYears covered:", sorted(ind["time_period"].unique().to_list()))
+print("\nNumber of countries:", ind["country"].n_unique())
+print("\nObs value stats:")
+print(ind["obs_value"].describe())
+```
+
+```{python}
+#| label: data-transform
+#| echo: true
+
+# --- Merge indicator with metadata on country + year ---
+merged = ind.join(
+    meta,
+    left_on=["country", "time_period"],
+    right_on=["country", "year"],
+    how="left"
+)
+
+# --- Filter to Total sex only (no disaggregation needed) ---
+df = merged.filter(pl.col("sex") == "Total")
+
+# --- Drop rows where obs_value is null ---
+df = df.filter(pl.col("obs_value").is_not_null())
+
+# --- Latest available year per country (for snapshot maps/bar charts) ---
+latest_per_country = (
+    df.group_by("country")
+    .agg([
+        pl.col("obs_value").last().alias("latest_value"),
+        pl.col("time_period").last().alias("latest_year"),
+        pl.col("alpha_3_code").last(),
+        pl.col("GDP per capita (constant 2015 US$)").mean().alias("gdp_per_capita"),
+        pl.col("Life expectancy at birth, total (years)").mean().alias("life_expectancy"),
+        pl.col("Population, total").last().alias("population"),
+    ])
+    .sort("country")
+)
+
+# --- Regional grouping using alpha_2_code first letter heuristic ---
+# We'll use a manual region mapping based on alpha_3_code for a cleaner approach
+# For simplicity, we compute a continent approximation via geopandas world dataset
+world = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
+country_region = world[["name", "continent", "iso_a3"]].rename(
+    columns={"iso_a3": "alpha_3_code", "continent": "region"}
+)
+
+# Convert to polars
+region_pl = pl.from_pandas(country_region)
+
+latest_with_region = latest_per_country.join(
+    region_pl.select(["alpha_3_code", "region"]),
+    on="alpha_3_code",
+    how="left"
+)
+
+print("Countries with data:", latest_with_region.shape[0])
+print("\nLatest values sample:")
+print(latest_with_region.select(["country", "latest_value", "latest_year", "region"]).head(10))
+```
+
+---
+
+## The Global Picture: A World Map
+
+```{python}
+#| label: fig-world-map
+#| fig-cap: "Proportion of healthcare facilities with basic waste management services — latest available data per country"
+#| echo: true
+
+# Merge geopandas world with our indicator data
+world_plot = world.merge(
+    latest_per_country.to_pandas(),
+    left_on="iso_a3",
+    right_on="alpha_3_code",
+    how="left"
+)
+
+# Convert to pandas for plotnine
+map_df = world_plot[["name", "geometry", "latest_value"]].copy()
+map_df = map_df.dissolve(by="name", as_index=False)
+
+# Get centroids for plotting — convert to long/lat format
+map_df_plot = map_df.copy()
+map_df_plot["lon"] = map_df_plot.geometry.centroid.x
+map_df_plot["lat"] = map_df_plot.geometry.centroid.y
+
+# Use pandas for the plotnine world map
+world_pd = world_plot[["name", "geometry", "latest_value"]].copy()
+
+# plotnine world map using geom_map
+p_map = (
+    ggplot(world_pd)
+    + geom_map(aes(fill="latest_value"), color="white", size=0.2)
+    + scale_fill_gradientn(
+        colors=["#d73027", "#fc8d59", "#fee090", "#e0f3f8", "#91bfdb", "#4575b4"],
+        name="% of facilities",
+        na_value="#cccccc",
+        limits=[0, 100]
+    )
+    + labs(
+        title="Healthcare Waste Management Coverage by Country",
+        subtitle="Grey = no data available | Data: UNICEF",
+        caption="Latest available year per country (2000–2023)"
+    )
+    + theme_void()
+    + theme(
+        plot_title=element_text(size=14, weight="bold"),
+        plot_subtitle=element_text(size=10, color="#555555"),
+        legend_position="bottom",
+        legend_title=element_text(size=9),
+        figure_size=(12, 6)
+    )
+)
+
+p_map
+```
+
+The map tells an immediate story: **a striking north-south divide**. High-income countries across Europe, North America, and parts of East Asia show near-universal waste management coverage (deep blue). Meanwhile, large swathes of **Sub-Saharan Africa, South Asia, and parts of Latin America** are painted in reds and oranges — or grey, meaning **no data at all**. The absence of data is itself a signal of under-resourced health systems.
+
+---
+
+## Regional Breakdown: Who Is Falling Behind?
+
+```{python}
+#| label: fig-bar-region
+#| fig-cap: "Average healthcare waste management coverage by world region"
+#| echo: true
+
+# Group by region
+region_avg = (
+    latest_with_region.filter(pl.col("region").is_not_null())
+    .group_by("region")
+    .agg([
+        pl.col("latest_value").mean().alias("avg_value"),
+        pl.col("latest_value").count().alias("n_countries")
+    ])
+    .sort("avg_value")
+)
+
+region_pd = region_avg.to_pandas()
+
+p_bar = (
+    ggplot(region_pd, aes(x="reorder(region, avg_value)", y="avg_value", fill="avg_value"))
+    + geom_col(width=0.7)
+    + geom_text(
+        aes(label="avg_value.round(1).astype(str) + '%'"),
+        ha="left",
+        nudge_y=1,
+        size=9
+    )
+    + scale_fill_gradientn(
+        colors=["#d73027", "#fc8d59", "#fee090", "#4575b4"],
+        limits=[0, 100],
+        guide=False
+    )
+    + coord_flip()
+    + scale_y_continuous(limits=[0, 110])
+    + labs(
+        title="Average Healthcare Waste Management Coverage by Region",
+        subtitle="Based on latest available data per country",
+        x="",
+        y="Average % of facilities with waste management",
+        caption="Source: UNICEF Indicator Dataset"
+    )
+    + theme_minimal()
+    + theme(
+        plot_title=element_text(size=13, weight="bold"),
+        plot_subtitle=element_text(size=10, color="#555555"),
+        axis_text_y=element_text(size=10),
+        figure_size=(10, 6)
+    )
+)
+
+p_bar
+```
+
+The bar chart underlines the regional inequality starkly. **Europe and North America** average close to 100%, reflecting decades of investment in health infrastructure. **Africa** sits dramatically lower — often below 40% — revealing that in many countries, the majority of health facilities lack even **basic** waste disposal systems. This is not merely a hygiene problem; it is a direct driver of healthcare-associated infections, needlestick injuries, and environmental contamination.
+
+---
+
+## Does Wealth Explain It? A Scatterplot
+
+```{python}
+#| label: fig-scatter
+#| fig-cap: "Relationship between GDP per capita and healthcare waste management coverage"
+#| echo: true
+
+scatter_df = (
+    latest_with_region
+    .filter(
+        pl.col("gdp_per_capita").is_not_null()
+        & pl.col("latest_value").is_not_null()
+        & pl.col("region").is_not_null()
+    )
+    .to_pandas()
+)
+
+# Log-transform GDP for better spread
+scatter_df["log_gdp"] = np.log10(scatter_df["gdp_per_capita"])
+
+p_scatter = (
+    ggplot(scatter_df, aes(x="log_gdp", y="latest_value", color="region"))
+    + geom_point(aes(size="population"), alpha=0.6)
+    + geom_smooth(method="lm", color="#333333", se=True, linetype="dashed")
+    + scale_color_brewer(type="qual", palette="Set2", name="Region")
+    + scale_size_continuous(guide=False, range=(2, 12))
+    + scale_x_continuous(
+        breaks=[2, 3, 4, 5],
+        labels=["$100", "$1,000", "$10,000", "$100,000"]
+    )
+    + labs(
+        title="Wealthier Countries Have Better Healthcare Waste Management",
+        subtitle="Each dot = one country | Dot size = population | Dashed line = linear trend",
+        x="GDP per Capita (log scale, constant 2015 USD)",
+        y="% of Facilities with Waste Management",
+        caption="Source: UNICEF & World Bank via UNICEF Metadata"
+    )
+    + theme_minimal()
+    + theme(
+        plot_title=element_text(size=13, weight="bold"),
+        plot_subtitle=element_text(size=10, color="#555555"),
+        legend_position="right",
+        figure_size=(11, 6)
+    )
+)
+
+p_scatter
+```
+
+The scatterplot reveals a **clear positive relationship** between a country's GDP per capita and its healthcare waste management coverage. The linear regression line (dashed) confirms this trend: as national income rises, so does the proportion of facilities with waste management services. Notably, **African nations cluster in the bottom-left** — low income, low coverage — while **European countries cluster in the top-right**. However, there is meaningful variance: some middle-income countries punch above their weight, suggesting that **policy choices and political will** — not just wealth — matter.
+
+---
+
+## A Race Against Time: Trends Over the Years
+
+```{python}
+#| label: fig-timeseries
+#| fig-cap: "Trends in healthcare waste management coverage over time by region"
+#| echo: true
+
+# Get region for all years
+all_years = df.join(
+    region_pl.select(["alpha_3_code", "region"]),
+    on="alpha_3_code",
+    how="left"
+)
+
+time_trend = (
+    all_years
+    .filter(pl.col("region").is_not_null())
+    .group_by(["time_period", "region"])
+    .agg(pl.col("obs_value").mean().alias("avg_value"))
+    .sort(["region", "time_period"])
+)
+
+trend_pd = time_trend.to_pandas()
+
+p_time = (
+    ggplot(trend_pd, aes(x="time_period", y="avg_value", color="region", group="region"))
+    + geom_line(size=1.2)
+    + geom_point(size=2, alpha=0.7)
+    + scale_color_brewer(type="qual", palette="Set2", name="Region")
+    + scale_x_continuous(breaks=range(2000, 2024, 2))
+    + scale_y_continuous(limits=[0, 105])
+    + labs(
+        title="Trends in Healthcare Waste Management Coverage (2000–2023)",
+        subtitle="Regional averages — higher is better",
+        x="Year",
+        y="Average % of Facilities with Waste Management",
+        caption="Source: UNICEF Indicator Dataset"
+    )
+    + theme_minimal()
+    + theme(
+        plot_title=element_text(size=13, weight="bold"),
+        plot_subtitle=element_text(size=10, color="#555555"),
+        axis_text_x=element_text(angle=45, hjust=1),
+        legend_position="right",
+        figure_size=(11, 6)
+    )
+)
+
+p_time
+```
+
+The time-series chart shows **slow but uneven progress**. Europe and North America have maintained high coverage throughout the period. Africa shows some upward movement — a hopeful sign — but coverage remains critically low. The data also shows **significant gaps in reporting**, particularly in earlier years, which itself reflects the limited monitoring infrastructure in lower-income regions.
+
+---
+
+## Conclusions & Call to Action
+
+This analysis paints a picture of **a world divided by its capacity to safely handle healthcare's own risks**. The key findings are:
+
+- **A stark geographic divide exists**: European and North American facilities are near-fully covered; African facilities often have fewer than 1 in 3 meeting basic standards.
+- **Wealth is strongly correlated** with better waste management, but is not the only factor — policy investment matters too.
+- **Progress is slow**: Despite over two decades of data, many of the lowest-coverage countries have seen only marginal improvement.
+- **Data gaps are themselves a problem**: Many of the most vulnerable countries have limited monitoring data, making the true scale of the crisis unknown.
+
+### What Needs to Change
+
+- **Increased international funding** targeted at health infrastructure in low-income countries
+- **Mandatory reporting standards** so the extent of the problem can be properly measured
+- **Knowledge transfer programs** to help facilities in under-resourced settings adopt low-cost waste management solutions
+- **Integration** of waste management into broader health system strengthening initiatives
+
+The COVID-19 pandemic generated an unprecedented surge in medical waste — PPE, syringes, test kits. For countries already struggling with basic waste management, this created a **crisis within a crisis**. The data in this report is not just a statistic — it represents real risk to real people: health workers, patients, and communities living near under-resourced facilities.
+
+---
+
+*Report prepared using UNICEF indicator data. All visualisations created with `plotnine`. Data transformations performed with `polars`. Published via Quarto and GitHub Pages.*
